@@ -17,8 +17,8 @@
 package com.android.server.telecom;
 
 import android.content.Context;
-import android.os.UserHandle;
 import android.telecom.DisconnectCause;
+import android.telecom.Log;
 import android.telecom.ParcelableConnection;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
@@ -132,8 +132,10 @@ public class CreateConnectionProcessor implements CreateConnectionResponse {
             mAttemptRecords.add(new CallAttemptRecord(
                     mCall.getTargetPhoneAccount(), mCall.getTargetPhoneAccount()));
         }
-        adjustAttemptsForConnectionManager();
-        adjustAttemptsForEmergency(mCall.getTargetPhoneAccount());
+        if (!mCall.isSelfManaged()) {
+            adjustAttemptsForConnectionManager();
+            adjustAttemptsForEmergency(mCall.getTargetPhoneAccount());
+        }
         mAttemptRecordIterator = mAttemptRecords.iterator();
         attemptNextPhoneAccount();
     }
@@ -327,15 +329,22 @@ public class CreateConnectionProcessor implements CreateConnectionResponse {
 
             // Next, add all SIM phone accounts which can place emergency calls.
             TelephonyUtil.sortSimPhoneAccounts(mContext, allAccounts);
-            for (PhoneAccount phoneAccount : allAccounts) {
-                if (phoneAccount.hasCapabilities(PhoneAccount.CAPABILITY_PLACE_EMERGENCY_CALLS) &&
-                        phoneAccount.hasCapabilities(PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION)) {
-                    PhoneAccountHandle phoneAccountHandle = phoneAccount.getAccountHandle();
-                    // Don't add the preferred account since it has already been added previously.
-                    if (!phoneAccountHandle.equals(preferredPAH)) {
+
+            // If preferredPA has sim capability and is already into mAttemptRecords, then no need
+            // to add other sim accounts. Because, amoung sim phone accounts, redial is handled in
+            // svc/telephony, hence don't need multiple sim accounts here.
+            if (mAttemptRecords.isEmpty()) {
+                for (PhoneAccount phoneAccount : allAccounts) {
+                    if (phoneAccount.hasCapabilities(PhoneAccount.CAPABILITY_PLACE_EMERGENCY_CALLS)
+                            && phoneAccount.hasCapabilities(
+                            PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION)) {
+                        PhoneAccountHandle phoneAccountHandle = phoneAccount.getAccountHandle();
                         Log.i(this, "Will try PSTN account %s for emergency", phoneAccountHandle);
                         mAttemptRecords.add(new CallAttemptRecord(phoneAccountHandle,
                                 phoneAccountHandle));
+                        // Add atmost one sim phone account, to avoid svc/telecom redialling on
+                        // multiple sim phone accounts.
+                        break;
                     }
                 }
             }

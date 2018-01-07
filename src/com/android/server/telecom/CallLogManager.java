@@ -21,14 +21,15 @@ import android.content.Context;
 import android.content.Intent;
 import android.location.Country;
 import android.location.CountryDetector;
-import android.location.CountryListener;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Looper;
 import android.os.UserHandle;
 import android.os.PersistableBundle;
 import android.provider.CallLog.Calls;
+import android.telecom.Connection;
 import android.telecom.DisconnectCause;
+import android.telecom.Log;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.VideoProfile;
@@ -147,11 +148,17 @@ public final class CallLogManager extends CallsManagerListenerBase {
         // 2) It is a conference call
         // 3) Call was not explicitly canceled
         // 4) Call is not an external call
+        // 5) Call is not a self-managed call OR call is a self-managed call which has indicated it
+        //    should be logged in its PhoneAccount
         if (isNewlyDisconnected &&
                 (oldState != CallState.SELECT_PHONE_ACCOUNT &&
-                 !call.isConference() &&
-                 !isCallCanceled) &&
-                !call.isExternalCall()) {
+                        !call.isConference() &&
+                        !isCallCanceled) &&
+                !call.isExternalCall() &&
+                (!call.isSelfManaged() ||
+                        (call.isLoggedSelfManaged() &&
+                                (call.getHandoverState() == HandoverState.HANDOVER_NONE ||
+                                call.getHandoverState() == HandoverState.HANDOVER_COMPLETE)))) {
             int type;
             if (!call.isIncoming()) {
                 type = Calls.OUTGOING_TYPE;
@@ -164,7 +171,10 @@ public final class CallLogManager extends CallsManagerListenerBase {
             } else {
                 type = Calls.INCOMING_TYPE;
             }
-            logCall(call, type, true /*showNotificationForMissedCall*/);
+            // Always show the notification for managed calls. For self-managed calls, it is up to
+            // the app to show the notification, so suppress the notification when logging the call.
+            boolean showNotification = !call.isSelfManaged();
+            logCall(call, type, showNotification);
         }
     }
 
@@ -174,7 +184,8 @@ public final class CallLogManager extends CallsManagerListenerBase {
                     new LogCallCompletedListener() {
                         @Override
                         public void onLogCompleted(@Nullable Uri uri) {
-                            mMissedCallNotifier.showMissedCallNotification(call);
+                            mMissedCallNotifier.showMissedCallNotification(
+                                    new MissedCallNotifier.CallInfo(call));
                         }
                     });
         } else {
@@ -219,10 +230,13 @@ public final class CallLogManager extends CallsManagerListenerBase {
 
         int callFeatures = getCallFeatures(call.getVideoStateHistory(),
                 call.getDisconnectCause().getCode() == DisconnectCause.CALL_PULLED);
+        final boolean imsCallLogEnabled = mContext.getResources().
+                getBoolean(R.bool.ims_call_type_enabled);
         logCall(call.getCallerInfo(), logNumber, call.getPostDialDigits(), formattedViaNumber,
-                call.getHandlePresentation(), callLogType, callFeatures, accountHandle,
-                creationTime, age, callDataUsage, call.isEmergencyCall(), call.getInitiatingUser(),
-                logCallCompletedListener);
+                call.getHandlePresentation(), imsCallLogEnabled ?
+                toPreciseLogType(call, callLogType) : callLogType, callFeatures,
+                accountHandle, creationTime, age, callDataUsage, call.isEmergencyCall(),
+                call.getInitiatingUser(), logCallCompletedListener);
     }
 
     /**
@@ -263,7 +277,8 @@ public final class CallLogManager extends CallsManagerListenerBase {
         boolean okToLogEmergencyNumber = false;
         CarrierConfigManager configManager = (CarrierConfigManager) mContext.getSystemService(
                 Context.CARRIER_CONFIG_SERVICE);
-        PersistableBundle configBundle = configManager.getConfig();
+        PersistableBundle configBundle = configManager.getConfigForSubId(
+                mPhoneAccountRegistrar.getSubscriptionIdForPhoneAccount(accountHandle));
         if (configBundle != null) {
             okToLogEmergencyNumber = configBundle.getBoolean(
                     CarrierConfigManager.KEY_ALLOW_EMERGENCY_NUMBERS_IN_CALL_LOG_BOOL);
@@ -472,5 +487,29 @@ public final class CallLogManager extends CallsManagerListenerBase {
             }
             return mCurrentCountryIso;
         }
+    }
+
+    private int toPreciseLogType(Call call, int callLogType) {
+        final boolean isHighDefAudioCall =
+               (call != null) && call.hasProperty(Connection.PROPERTY_HIGH_DEF_AUDIO);
+        Log.d(TAG, "callProperties: " + call.getConnectionProperties()
+                + "isHighDefAudioCall: " + isHighDefAudioCall);
+        if(!isHighDefAudioCall) {
+            return callLogType;
+        }
+        switch (callLogType) {
+            case Calls.INCOMING_TYPE :
+                callLogType = Calls.INCOMING_IMS_TYPE;
+                break;
+            case Calls.OUTGOING_TYPE :
+                callLogType = Calls.OUTGOING_IMS_TYPE;
+                break;
+            case Calls.MISSED_TYPE :
+                callLogType = Calls.MISSED_IMS_TYPE;
+                break;
+            default:
+                //Normal cs call, no change
+        }
+        return callLogType;
     }
 }

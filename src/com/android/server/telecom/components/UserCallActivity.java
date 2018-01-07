@@ -17,15 +17,16 @@
 package com.android.server.telecom.components;
 
 import com.android.server.telecom.CallIntentProcessor;
-import com.android.server.telecom.Log;
 import com.android.server.telecom.TelecomSystem;
 
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.telecom.Log;
 import android.telecom.TelecomManager;
 
 // TODO: Needed for move to system service: import com.android.internal.R;
@@ -52,6 +53,11 @@ public class UserCallActivity extends Activity implements TelecomSystem.Componen
     @Override
     protected void onCreate(Bundle bundle) {
         super.onCreate(bundle);
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        PowerManager.WakeLock wakelock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                "UserCallActivity");
+        wakelock.acquire();
+
         Log.startSession("UCA.oC");
         try {
             // TODO: Figure out if there is something to restore from bundle.
@@ -64,11 +70,16 @@ public class UserCallActivity extends Activity implements TelecomSystem.Componen
             // accurately determine whether the calling package has the CALL_PHONE runtime permission.
             // At this point in time we trust that the ActivityManager has already performed this
             // validation before starting this activity.
-            new UserCallIntentProcessor(this, userHandle).processIntent(getIntent(),
+            // Create a new instance of intent to avoid modifying the
+            // ActivityThread.ActivityClientRecord#intent directly.
+            // Modifying directly may be a potential risk when relaunching this activity.
+            new UserCallIntentProcessor(this, userHandle).processIntent(new Intent(intent),
                     getCallingPackage(), true /* hasCallAppOp*/);
         } finally {
             Log.endSession();
+            wakelock.release();
         }
+        Log.i(this, "onCreate done");
         finish();
     }
 

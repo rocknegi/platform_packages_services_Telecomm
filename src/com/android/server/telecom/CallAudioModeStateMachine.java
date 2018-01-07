@@ -18,9 +18,19 @@ package com.android.server.telecom;
 
 import android.media.AudioManager;
 import android.os.Message;
+import android.os.SystemProperties;
+import android.telecom.Log;
+import android.telecom.Logging.Runnable;
+import android.telecom.Logging.Session;
+import android.telecom.PhoneAccount;
+import android.telecom.PhoneAccountHandle;
+import android.telecom.TelecomManager;
+import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyManager;
 import android.util.SparseArray;
 
 import com.android.internal.util.IState;
+import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 
@@ -204,12 +214,6 @@ public class CallAudioModeStateMachine extends StateMachine {
             if (mCallAudioManager.startRinging()) {
                 mAudioManager.requestAudioFocusForCall(AudioManager.STREAM_RING,
                         AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
-                if (mMostRecentMode == AudioManager.MODE_IN_CALL) {
-                    // Preserving behavior from the old CallAudioManager.
-                    Log.i(LOG_TAG, "Transition from IN_CALL -> RINGTONE."
-                            + "  Resetting to NORMAL first.");
-                    mAudioManager.setMode(AudioManager.MODE_NORMAL);
-                }
                 mAudioManager.setMode(AudioManager.MODE_RINGTONE);
                 mCallAudioManager.setCallAudioRouteFocusState(CallAudioRouteStateMachine.RINGING_FOCUS);
             } else {
@@ -272,9 +276,10 @@ public class CallAudioModeStateMachine extends StateMachine {
                     // This happens when an IMS call is answered by the in-call UI. Special case
                     // that we have to deal with for some reason.
 
-                    // VOIP calls should never invoke this mechanism, so transition directly to
-                    // the sim call focus state.
-                    transitionTo(mSimCallFocusState);
+                    // The IMS audio routing may be via modem or via RTP stream. In case via RTP
+                    // stream, the state machine should transit to mVoipCallFocusState.
+                    transitionTo(args.foregroundCallIsVoip
+                            ? mVoipCallFocusState : mSimCallFocusState);
                     return HANDLED;
                 default:
                     // The forced focus switch commands are handled by BaseState.
@@ -287,8 +292,26 @@ public class CallAudioModeStateMachine extends StateMachine {
         @Override
         public void enter() {
             Log.i(LOG_TAG, "Audio focus entering SIM CALL state");
+            boolean setMsimAudioParams = SystemProperties
+                    .getBoolean("ro.multisim.set_audio_params", false);
+            Call call = mCallAudioManager.getForegroundCall();
+
             mAudioManager.requestAudioFocusForCall(AudioManager.STREAM_VOICE_CALL,
                     AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+
+            if (call != null && call.getTargetPhoneAccount() != null && setMsimAudioParams) {
+                PhoneAccountHandle handle = call.getTargetPhoneAccount();
+                PhoneAccount account = mTelecomManager.getPhoneAccount(handle);
+                int subId = TelephonyManager.getDefault().getSubIdForPhoneAccount(account);
+                int phoneId = SubscriptionManager.getPhoneId(subId);
+                Log.d(LOG_TAG, "setAudioParameters phoneId=" + phoneId);
+                if (phoneId == 0) {
+                    mAudioManager.setParameters("phone_type=cp1");
+                } else if (phoneId == 1) {
+                    mAudioManager.setParameters("phone_type=cp2");
+                }
+            }
+
             mAudioManager.setMode(AudioManager.MODE_IN_CALL);
             mMostRecentMode = AudioManager.MODE_IN_CALL;
             mCallAudioManager.setCallAudioRouteFocusState(CallAudioRouteStateMachine.ACTIVE_FOCUS);
@@ -378,7 +401,9 @@ public class CallAudioModeStateMachine extends StateMachine {
                     // Do nothing.
                     return HANDLED;
                 case NEW_ACTIVE_OR_DIALING_CALL:
-                    // Do nothing. Already active.
+                    if (!args.foregroundCallIsVoip) {
+                        transitionTo(mSimCallFocusState);
+                    }
                     return HANDLED;
                 case NEW_RINGING_CALL:
                     // Don't make a call ring over an active call, but do play a call waiting tone.
@@ -436,8 +461,13 @@ public class CallAudioModeStateMachine extends StateMachine {
                             ? mVoipCallFocusState : mSimCallFocusState);
                     return HANDLED;
                 case NEW_RINGING_CALL:
-                    // Apparently this is current behavior. Should this be the case?
-                    transitionTo(mRingingFocusState);
+                    if (args.hasHoldingCalls) {
+                        // Don't make a call ring over a held call, but do play
+                        // a call waiting tone.
+                        mCallAudioManager.startCallWaiting();
+                    } else {
+                        transitionTo(mRingingFocusState);
+                    }
                     return HANDLED;
                 case NEW_HOLDING_CALL:
                     // Do nothing.
@@ -464,14 +494,16 @@ public class CallAudioModeStateMachine extends StateMachine {
     private final BaseState mOtherFocusState = new OtherFocusState();
 
     private final AudioManager mAudioManager;
+    private final TelecomManager mTelecomManager;
     private CallAudioManager mCallAudioManager;
 
     private int mMostRecentMode;
     private boolean mIsInitialized = false;
 
-    public CallAudioModeStateMachine(AudioManager audioManager) {
+    public CallAudioModeStateMachine(AudioManager audioManager, TelecomManager telecomManager) {
         super(CallAudioModeStateMachine.class.getSimpleName());
         mAudioManager = audioManager;
+        mTelecomManager = telecomManager;
         mMostRecentMode = AudioManager.MODE_NORMAL;
 
         addState(mUnfocusedState);
@@ -510,6 +542,10 @@ public class CallAudioModeStateMachine extends StateMachine {
                 Log.w(LOG_TAG, "The message was of code %d = %s",
                         msg.what, MESSAGE_CODE_TO_NAME.get(msg.what));
         }
+    }
+
+    public void dumpPendingMessages(IndentingPrintWriter pw) {
+        getHandler().getLooper().dump(pw::println, "");
     }
 
     @Override

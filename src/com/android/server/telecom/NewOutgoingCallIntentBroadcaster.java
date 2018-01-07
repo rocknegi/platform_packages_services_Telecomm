@@ -28,13 +28,16 @@ import android.os.Bundle;
 import android.os.Trace;
 import android.os.UserHandle;
 import android.telecom.GatewayInfo;
+import android.telecom.Log;
 import android.telecom.PhoneAccount;
+import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
 import android.telecom.VideoProfile;
 import android.telephony.DisconnectCause;
 import android.text.TextUtils;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.telephony.TelephonyProperties;
 
 // TODO: Needed for move to system service: import com.android.internal.R;
 
@@ -141,13 +144,21 @@ public class NewOutgoingCallIntentBroadcaster {
                                         " ignore the broadcast Call %s", mCall);
                         return;
                     }
-
-                    Uri resultHandleUri = Uri.fromParts(
-                            mPhoneNumberUtilsAdapter.isUriNumber(resultNumber) ?
-                                    PhoneAccount.SCHEME_SIP : PhoneAccount.SCHEME_TEL,
-                            resultNumber, null);
-
+                    boolean isSkipSchemaParsing = mIntent.getBooleanExtra(
+                            TelephonyProperties.EXTRA_SKIP_SCHEMA_PARSING, false);
+                    Uri resultHandleUri = null;
                     Uri originalUri = mIntent.getData();
+                    if (isSkipSchemaParsing) {
+                        // resultNumber does not have the schema present
+                        // hence use originalUri which is same as handle
+                        resultHandleUri = Uri.fromParts(PhoneAccount.SCHEME_TEL,
+                                originalUri.toString(), null);
+                    } else {
+                        resultHandleUri = Uri.fromParts(
+                                mPhoneNumberUtilsAdapter.isUriNumber(resultNumber) ?
+                                PhoneAccount.SCHEME_SIP : PhoneAccount.SCHEME_TEL,
+                                resultNumber, null);
+                    }
 
                     if (originalUri.getSchemeSpecificPart().equals(resultNumber)) {
                         Log.v(this, "Call number unmodified after" +
@@ -225,13 +236,19 @@ public class NewOutgoingCallIntentBroadcaster {
         }
 
         String number = mPhoneNumberUtilsAdapter.getNumberFromIntent(intent, mContext);
-        if (TextUtils.isEmpty(number)) {
+        boolean isConferenceUri = intent.getBooleanExtra(
+                TelephonyProperties.EXTRA_DIAL_CONFERENCE_URI, false);
+        if (!isConferenceUri && TextUtils.isEmpty(number)) {
             Log.w(this, "Empty number obtained from the call intent.");
             return DisconnectCause.NO_PHONE_NUMBER_SUPPLIED;
         }
 
         boolean isUriNumber = mPhoneNumberUtilsAdapter.isUriNumber(number);
-        if (!isUriNumber) {
+        boolean isSkipSchemaParsing = intent.getBooleanExtra(
+                TelephonyProperties.EXTRA_SKIP_SCHEMA_PARSING, false);
+        Log.v(this,"processIntent isConferenceUri: " + isConferenceUri +
+                " isSkipSchemaParsing = " + isSkipSchemaParsing);
+        if (!isUriNumber && !isConferenceUri && !isSkipSchemaParsing) {
             number = mPhoneNumberUtilsAdapter.convertKeypadLettersToDigits(number);
             number = mPhoneNumberUtilsAdapter.stripSeparators(number);
         }
@@ -268,6 +285,21 @@ public class NewOutgoingCallIntentBroadcaster {
             return DisconnectCause.INVALID_NUMBER;
         }
 
+        // True for all managed calls, false for self-managed calls.
+        boolean sendNewOutgoingCallBroadcast = true;
+        PhoneAccountHandle targetPhoneAccount = mIntent.getParcelableExtra(
+                TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE);
+        if (targetPhoneAccount != null) {
+            PhoneAccount phoneAccount =
+                    mCallsManager.getPhoneAccountRegistrar().getPhoneAccountUnchecked(
+                            targetPhoneAccount);
+            if (phoneAccount != null && phoneAccount.isSelfManaged()) {
+                callImmediately = true;
+                sendNewOutgoingCallBroadcast = false;
+                Log.i(this, "Skipping NewOutgoingCallBroadcast for self-managed call.");
+            }
+        }
+
         if (callImmediately) {
             Log.i(this, "Placing call immediately instead of waiting for "
                     + " OutgoingCallBroadcastReceiver: %s", intent);
@@ -277,6 +309,11 @@ public class NewOutgoingCallIntentBroadcaster {
             int videoState = mIntent.getIntExtra(
                     TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE,
                     VideoProfile.STATE_AUDIO_ONLY);
+            // Since we will not start NewOutgoingCallBroadcastIntentReceiver in case of
+            // callImmediately is true, make sure to mark it as ready, so that when user
+            // selects account, call can go ahead in case of numbers which are potential emergency
+            // but not actual emergeny.
+            mCall.setNewOutgoingCallIntentBroadcastIsDone();
             mCallsManager.placeOutgoingCall(mCall, Uri.fromParts(scheme, number, null), null,
                     speakerphoneOn, videoState);
 
@@ -286,9 +323,12 @@ public class NewOutgoingCallIntentBroadcaster {
             // initiate the call again because of the presence of the EXTRA_ALREADY_CALLED extra.
         }
 
-        UserHandle targetUser = mCall.getInitiatingUser();
-        Log.i(this, "Sending NewOutgoingCallBroadcast for %s to %s", mCall, targetUser);
-        broadcastIntent(intent, number, !callImmediately, targetUser);
+        if (sendNewOutgoingCallBroadcast) {
+            UserHandle targetUser = mCall.getInitiatingUser();
+            Log.i(this, "Sending NewOutgoingCallBroadcast for %s to %s", mCall, targetUser);
+            number = isSkipSchemaParsing ? handle.toString() : number;
+            broadcastIntent(intent, number, !callImmediately, targetUser);
+        }
         return DisconnectCause.NOT_DISCONNECTED;
     }
 
@@ -314,7 +354,8 @@ public class NewOutgoingCallIntentBroadcaster {
 
         // Force receivers of this broadcast intent to run at foreground priority because we
         // want to finish processing the broadcast intent as soon as possible.
-        broadcastIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+        broadcastIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND
+                | Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND);
         Log.v(this, "Broadcasting intent: %s.", broadcastIntent);
 
         checkAndCopyProviderExtras(originalCallIntent, broadcastIntent);

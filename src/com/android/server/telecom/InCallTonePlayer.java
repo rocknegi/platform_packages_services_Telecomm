@@ -20,6 +20,9 @@ import android.media.AudioManager;
 import android.media.ToneGenerator;
 import android.os.Handler;
 import android.os.Looper;
+import android.telecom.Log;
+import android.telecom.Logging.Runnable;
+import android.telecom.Logging.Session;
 
 import com.android.internal.annotations.VisibleForTesting;
 
@@ -37,11 +40,13 @@ public class InCallTonePlayer extends Thread {
         private CallAudioManager mCallAudioManager;
         private final CallAudioRoutePeripheralAdapter mCallAudioRoutePeripheralAdapter;
         private final TelecomSystem.SyncRoot mLock;
+        private final ToneGeneratorFactory mToneGeneratorFactory;
 
         Factory(CallAudioRoutePeripheralAdapter callAudioRoutePeripheralAdapter,
-                TelecomSystem.SyncRoot lock) {
+                TelecomSystem.SyncRoot lock, ToneGeneratorFactory toneGeneratorFactory) {
             mCallAudioRoutePeripheralAdapter = callAudioRoutePeripheralAdapter;
             mLock = lock;
+            mToneGeneratorFactory = toneGeneratorFactory;
         }
 
         public void setCallAudioManager(CallAudioManager callAudioManager) {
@@ -50,8 +55,12 @@ public class InCallTonePlayer extends Thread {
 
         public InCallTonePlayer createPlayer(int tone) {
             return new InCallTonePlayer(tone, mCallAudioManager,
-                    mCallAudioRoutePeripheralAdapter, mLock);
+                    mCallAudioRoutePeripheralAdapter, mLock, mToneGeneratorFactory);
         }
+    }
+
+    public interface ToneGeneratorFactory {
+        ToneGenerator get (int streamType, int volume);
     }
 
     // The possible tones that we can play.
@@ -108,6 +117,8 @@ public class InCallTonePlayer extends Thread {
     private Session mSession;
     private final Object mSessionLock = new Object();
 
+    private final ToneGeneratorFactory mToneGenerator;
+
     /**
      * Initializes the tone player. Private; use the {@link Factory} to create tone players.
      *
@@ -117,12 +128,14 @@ public class InCallTonePlayer extends Thread {
             int toneId,
             CallAudioManager callAudioManager,
             CallAudioRoutePeripheralAdapter callAudioRoutePeripheralAdapter,
-            TelecomSystem.SyncRoot lock) {
+            TelecomSystem.SyncRoot lock,
+            ToneGeneratorFactory toneGeneratorFactory) {
         mState = STATE_OFF;
         mToneId = toneId;
         mCallAudioManager = callAudioManager;
         mCallAudioRoutePeripheralAdapter = callAudioRoutePeripheralAdapter;
         mLock = lock;
+        mToneGenerator = toneGeneratorFactory;
     }
 
     /** {@inheritDoc} */
@@ -224,7 +237,7 @@ public class InCallTonePlayer extends Thread {
             // signal, and is not as important.
             try {
                 Log.v(this, "Creating generator");
-                toneGenerator = new ToneGenerator(stream, toneVolume);
+                toneGenerator = mToneGenerator.get(stream, toneVolume);
             } catch (RuntimeException e) {
                 Log.w(this, "Failed to create ToneGenerator.", e);
                 return;

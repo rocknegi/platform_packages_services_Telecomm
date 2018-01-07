@@ -23,17 +23,22 @@ import android.telephony.PhoneNumberUtils;
 public class PhoneNumberUtilsAdapterImpl implements PhoneNumberUtilsAdapter {
     @Override
     public boolean isLocalEmergencyNumber(Context context, String number) {
-            return PhoneNumberUtils.isLocalEmergencyNumber(context, number);
+            return TelephonyUtil.isLocalEmergencyNumber(number);
     }
 
     @Override
     public boolean isPotentialLocalEmergencyNumber(Context context, String number) {
-        return PhoneNumberUtils.isPotentialLocalEmergencyNumber(context, number);
+        return TelephonyUtil.isPotentialLocalEmergencyNumber(number);
     }
 
     @Override
     public boolean isUriNumber(String number) {
         return PhoneNumberUtils.isUriNumber(number);
+    }
+
+    @Override
+    public boolean isSamePhoneNumber(String number1, String number2) {
+        return PhoneNumberUtils.compare(number1, number2);
     }
 
     @Override
